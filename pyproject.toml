@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dp-autoclicker"
+version = "1.0.0"
+description = "Автокликер с плавающим окном, визуальным конструктором алгоритмов и переносимыми пресетами"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+dependencies = ["PySide6>=6.5", "pynput>=1.7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+dp-autoclicker = "dp_autoclicker.app:main"
+
+[tool.setuptools.packages.find]
+include = ["dp_autoclicker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:dp_autoclicker.*"]

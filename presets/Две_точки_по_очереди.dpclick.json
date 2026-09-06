@@ -1,0 +1,66 @@
+{
+  "format": "dp-autoclicker-preset",
+  "version": 1,
+  "name": "Две точки по очереди",
+  "description": "Кликает поочерёдно в две точки со случайной паузой.",
+  "author": "DP Autoclicker",
+  "tags": [
+    "базовый",
+    "случайность"
+  ],
+  "points": [
+    {
+      "name": "Точка1",
+      "x": 840,
+      "y": 540,
+      "radius": 0.0,
+      "shape": "",
+      "color": "#5B8CFF",
+      "note": "",
+      "id": "ac8ae494"
+    },
+    {
+      "name": "Точка2",
+      "x": 1080,
+      "y": 540,
+      "radius": 0.0,
+      "shape": "",
+      "color": "#4ED6A1",
+      "note": "",
+      "id": "d6b809e9"
+    }
+  ],
+  "script": "# Чередование двух точек со случайной паузой\nцикл {\n    клик Точка1\n    ждать 300мс..700мс\n    клик Точка2\n    ждать 300мс..700мс\n}\n",
+  "randomization": {
+    "enabled": true,
+    "position_jitter": 5.0,
+    "shape": "circle",
+    "avoid_repeat": true,
+    "min_separation": 3.0,
+    "delay_jitter": 0.15,
+    "hold_min_ms": 20.0,
+    "hold_max_ms": 70.0,
+    "humanize_move": false,
+    "move_duration_min_ms": 90.0,
+    "move_duration_max_ms": 240.0,
+    "move_steps": 24,
+    "idle_chance": 0.0,
+    "idle_min_ms": 400.0,
+    "idle_max_ms": 1500.0,
+    "seed": 0
+  },
+  "run": {
+    "speed": 1.0,
+    "dry_run": false,
+    "start_delay": 0.0,
+    "max_runtime": 0.0,
+    "max_actions": 0,
+    "click_through_when_running": true
+  },
+  "screen": {
+    "width": 1920,
+    "height": 1080
+  },
+  "created": "2026-09-06T11:19:11+00:00",
+  "modified": "2026-09-06T11:19:11+00:00"
+}
