@@ -1,0 +1,65 @@
+{
+  "format": "dp-autoclicker-preset",
+  "version": 1,
+  "name": "Сложный сценарий",
+  "description": "Условия, счётчик итераций и случайные задержки.",
+  "author": "DP Autoclicker",
+  "tags": [
+    "продвинутый"
+  ],
+  "points": [
+    {
+      "name": "Кнопка_действия",
+      "x": 960,
+      "y": 700,
+      "radius": 0.0,
+      "shape": "",
+      "color": "#FFC46B",
+      "note": "",
+      "id": "33eea5b0"
+    },
+    {
+      "name": "Кнопка_проверки",
+      "x": 1200,
+      "y": 420,
+      "radius": 0.0,
+      "shape": "",
+      "color": "#FF6B7A",
+      "note": "",
+      "id": "8b09a1a4"
+    }
+  ],
+  "script": "# Пример сложного алгоритма: серия действий с условиями\nповторить 20 раз {\n    клик Кнопка_действия\n    ждать 400мс..900мс\n\n    # каждый пятый круг — дополнительная проверка\n    если итерация остаток 5 == 0 {\n        клик Кнопка_проверки кнопкой правая\n        ждать 1с\n        клавиша esc\n    }\n\n    # изредка делаем вид, что отвлеклись\n    если шанс(15%) {\n        ждать 2с..4с\n    }\n}\nсообщение \"Цикл завершён\"\n",
+  "randomization": {
+    "enabled": true,
+    "position_jitter": 6.0,
+    "shape": "circle",
+    "avoid_repeat": true,
+    "min_separation": 3.0,
+    "delay_jitter": 0.15,
+    "hold_min_ms": 20.0,
+    "hold_max_ms": 70.0,
+    "humanize_move": true,
+    "move_duration_min_ms": 90.0,
+    "move_duration_max_ms": 240.0,
+    "move_steps": 24,
+    "idle_chance": 0.1,
+    "idle_min_ms": 400.0,
+    "idle_max_ms": 1500.0,
+    "seed": 0
+  },
+  "run": {
+    "speed": 1.0,
+    "dry_run": false,
+    "start_delay": 3.0,
+    "max_runtime": 0.0,
+    "max_actions": 0,
+    "click_through_when_running": true
+  },
+  "screen": {
+    "width": 1920,
+    "height": 1080
+  },
+  "created": "2026-09-06T11:19:11+00:00",
+  "modified": "2026-09-06T11:19:11+00:00"
+}
