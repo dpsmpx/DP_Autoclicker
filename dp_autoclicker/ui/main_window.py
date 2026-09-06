@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -55,6 +55,9 @@ NAV_PAGES = (
 class MainWindow(QWidget):
     """Компактное окно-панель управления автокликером."""
 
+    #: горячая клавиша нажата; сигнал переносит вызов в поток интерфейса
+    hotkeyPressed = Signal(str)
+
     def __init__(
         self,
         state: AppState,
@@ -68,6 +71,9 @@ class MainWindow(QWidget):
         self._drag_offset: Optional[QPoint] = None
         self._pick_callback: Optional[Callable[[int, int], None]] = None
         self._pick_point = None
+        #: почему алгоритм на паузе (например, вмешательство пользователя)
+        self._pause_reason = ""
+        self.hotkeyPressed.connect(self._on_hotkey)
 
         self.setWindowTitle("DP Autoclicker")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -330,7 +336,13 @@ class MainWindow(QWidget):
             return
         self.log_page.clear()
         screen = self.state.screen_size
-        if self.engine.start(self.state.preset, self.state.program, screen):
+        self._pause_reason = ""
+        if self.engine.start(
+            self.state.preset,
+            self.state.program,
+            screen,
+            failsafe=self.state.config.failsafe,
+        ):
             self._update_transport()
             self._apply_click_through(True)
 
@@ -370,20 +382,26 @@ class MainWindow(QWidget):
         self.pause_button.setEnabled(running)
         self.pause_button.setText("Продолжить" if paused else "Пауза")
         if running:
-            self.status.set_state(
-                "Пауза" if paused else "Выполняется",
-                PALETTE.warning if paused else PALETTE.success,
-            )
+            if paused:
+                text = f"Пауза — {self._pause_reason}" if self._pause_reason else "Пауза"
+                self.status.set_state(text, PALETTE.warning)
+            else:
+                self.status.set_state("Выполняется", PALETTE.success)
         else:
             self.status.set_state("Готов к запуску", PALETTE.faint)
 
-        keys = self.state.config.hotkeys
-        if self.hotkeys.active:
-            self.hint_label.setText(
-                f"{describe(keys.start_stop)} — старт/стоп · {describe(keys.panic_stop)} — стоп"
-            )
+        registered = self.hotkeys.registered
+        if self.hotkeys.active and registered:
+            parts = [
+                f"{describe(registered[action])} — {title}"
+                for action, title in (("start_stop", "старт/стоп"), ("panic_stop", "стоп"))
+                if action in registered
+            ]
+            self.hint_label.setText(" · ".join(parts))
+            self.hint_label.setToolTip(self.hotkeys.status_text())
         else:
             self.hint_label.setText("горячие клавиши недоступны")
+            self.hint_label.setToolTip(self.hotkeys.status_text())
 
     # ------------------------------------------------------------- события
     def _poll_engine(self) -> None:
@@ -398,6 +416,10 @@ class MainWindow(QWidget):
 
     def _handle_event(self, event: EngineEvent) -> None:
         self.log_page.append_event(event)
+        if event.kind == "paused":
+            self._pause_reason = str(event.data.get("reason", ""))
+        elif event.kind in ("resumed", "started"):
+            self._pause_reason = ""
         if event.kind in ("error", "warning"):
             self._notify(event.message, error=event.kind == "error")
             if event.kind == "error":
@@ -573,40 +595,48 @@ class MainWindow(QWidget):
         self._notify(f"Экспортировано: {Path(path).name}")
 
     # ------------------------------------------------------ горячие клавиши
+    #: действие -> (подпись, обработчик)
+    HOTKEY_ACTIONS = (
+        ("start_stop", "старт/стоп"),
+        ("pause", "пауза"),
+        ("panic_stop", "аварийная остановка"),
+        ("pick_point", "новая точка под курсором"),
+    )
+
     def _rebind_hotkeys(self) -> None:
+        """Перерегистрирует глобальные сочетания и сообщает о результате."""
         keys = self.state.config.hotkeys
         self.hotkeys.stop()
         self.hotkeys.clear()
-        self.hotkeys.bind(keys.start_stop, self._hotkey(self.toggle_run))
-        self.hotkeys.bind(keys.pause, self._hotkey(self.toggle_pause))
-        self.hotkeys.bind(keys.panic_stop, self._hotkey(self.stop))
-        self.hotkeys.bind(keys.pick_point, self._hotkey(self.pick_point_hotkey))
-        ok = self.hotkeys.start()
-        message = (
-            "Горячие клавиши работают глобально: "
-            + ", ".join(
-                f"{describe(v)} — {k}"
-                for k, v in (
-                    ("старт/стоп", keys.start_stop),
-                    ("пауза", keys.pause),
-                    ("стоп", keys.panic_stop),
-                    ("новая точка", keys.pick_point),
-                )
+        for action, title in self.HOTKEY_ACTIONS:
+            self.hotkeys.bind(
+                action,
+                getattr(keys, action, ""),
+                # обработчик выполняется в потоке слушателя pynput,
+                # поэтому только отправляем сигнал — Qt поставит его в очередь
+                lambda a=action: self.hotkeyPressed.emit(a),
+                title,
             )
-            if ok
-            else self.hotkeys.error or "Горячие клавиши недоступны в этой системе"
-        )
+        ok = self.hotkeys.start()
         if hasattr(self, "settings_page"):
-            self.settings_page.set_hotkey_status(message, ok)
+            self.settings_page.set_hotkey_status(self.hotkeys.status_text(), ok)
         self._update_transport()
 
-    def _hotkey(self, action: Callable[[], None]) -> Callable[[], None]:
-        """Горячие клавиши приходят из чужого потока — переносим в поток UI."""
-
-        def handler() -> None:
-            QTimer.singleShot(0, action)
-
-        return handler
+    def _on_hotkey(self, action: str) -> None:
+        """Вызывается уже в потоке интерфейса."""
+        combo = getattr(self.state.config.hotkeys, action, "")
+        if self.engine.recently_sent(combo):
+            # это сочетание только что нажал сам алгоритм — не реагируем
+            return
+        handlers = {
+            "start_stop": self.toggle_run,
+            "pause": self.toggle_pause,
+            "panic_stop": self.stop,
+            "pick_point": self.pick_point_hotkey,
+        }
+        handler = handlers.get(action)
+        if handler is not None:
+            handler()
 
     # ------------------------------------------------------------- закрытие
     def _restore_geometry(self) -> None:

@@ -17,9 +17,10 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.backends import probe_backend
+from ...core.hotkeys import describe, validate
 from ..state import AppState
 from ..theme import PALETTE
-from ..widgets.common import Card, SliderRow, SwitchRow, hint_label
+from ..widgets.common import Card, SliderRow, SwitchRow, expanding, hint_label, text_button
 
 SHAPE_ITEMS = (("circle", "круг"), ("square", "квадрат"), ("gauss", "гаусс (чаще к центру)"))
 
@@ -52,6 +53,7 @@ class SettingsPage(QWidget):
 
         root.addWidget(self._build_random_card())
         root.addWidget(self._build_run_card())
+        root.addWidget(self._build_failsafe_card())
         root.addWidget(self._build_window_card())
         root.addWidget(self._build_hotkeys_card())
         root.addWidget(self._build_about_card())
@@ -182,6 +184,36 @@ class SettingsPage(QWidget):
         card.add(hint_label("Ограничения — страховка: алгоритм сам остановится."))
         return card
 
+    # -------------------------------------------------------------- страховка
+    def _build_failsafe_card(self) -> Card:
+        card = Card("Страховка")
+        self.watch_switch = SwitchRow(
+            "Пауза, если мышь двигают вручную",
+            "Алгоритм запоминает, куда поставил курсор. Если курсор уехал "
+            "сам — значит, за мышь взялись вы, и работа приостанавливается.",
+        )
+        self.watch_switch.toggled.connect(self._apply_failsafe)
+        card.add(self.watch_switch)
+
+        self.watch_threshold = SliderRow("Порог срабатывания", 5, 200, 40, 5, " px")
+        self.watch_threshold.valueChanged.connect(self._apply_failsafe)
+        card.add(self.watch_threshold)
+
+        self.watch_stop_switch = SwitchRow(
+            "Останавливать, а не ставить на паузу",
+            "Обычно достаточно паузы: продолжить можно кнопкой или "
+            "горячей клавишей.",
+        )
+        self.watch_stop_switch.toggled.connect(self._apply_failsafe)
+        card.add(self.watch_stop_switch)
+        card.add(
+            hint_label(
+                "Слежение включается после первого перемещения курсора алгоритмом, "
+                "поэтому свободно двигать мышью до старта и в алгоритмах без мыши можно."
+            )
+        )
+        return card
+
     # ------------------------------------------------------------------ окно
     def _build_window_card(self) -> Card:
         card = Card("Окно")
@@ -218,15 +250,29 @@ class SettingsPage(QWidget):
             row.addWidget(title)
             edit = QLineEdit()
             edit.setPlaceholderText("например f6 или ctrl+shift+s")
+            edit.textChanged.connect(self._check_hotkey_fields)
             edit.editingFinished.connect(self._apply_hotkeys)
             self.hotkey_edits[key] = edit
             row.addWidget(edit, 1)
             card.body().addLayout(row)
+
         self.hotkey_status = QLabel()
         self.hotkey_status.setWordWrap(True)
         self.hotkey_status.setProperty("role", "hint")
         card.add(self.hotkey_status)
+        card.add_row(
+            text_button("Проверить сейчас", "", "check", self._apply_hotkeys),
+            expanding(),
+        )
         return card
+
+    def _check_hotkey_fields(self) -> None:
+        """Подсвечивает поле красным, если сочетание записано неверно."""
+        for edit in self.hotkey_edits.values():
+            text = edit.text().strip()
+            problem = validate(text) if text else ""
+            edit.setStyleSheet("" if not problem else f"border-color: {PALETTE.danger};")
+            edit.setToolTip(problem or (describe(text) if text else ""))
 
     def _build_about_card(self) -> Card:
         card = Card("Система")
@@ -276,6 +322,13 @@ class SettingsPage(QWidget):
             self.max_runtime.setValue(int(run.max_runtime))
             self.max_actions.setValue(int(run.max_actions))
 
+            failsafe = self.state.config.failsafe
+            self.watch_switch.setChecked(failsafe.watch_user_move)
+            self.watch_threshold.setValue(failsafe.threshold)
+            self.watch_stop_switch.setChecked(failsafe.stop_instead_of_pause)
+            self.watch_threshold.setEnabled(failsafe.watch_user_move)
+            self.watch_stop_switch.setEnabled(failsafe.watch_user_move)
+
             window = self.state.config.window
             self.opacity.setValue(window.opacity)
             self.on_top_switch.setChecked(window.always_on_top)
@@ -283,6 +336,7 @@ class SettingsPage(QWidget):
 
             for key, edit in self.hotkey_edits.items():
                 edit.setText(getattr(self.state.config.hotkeys, key, ""))
+            self._check_hotkey_fields()
             self.author.setText(self.state.config.author)
         finally:
             self._loading = False
@@ -322,6 +376,17 @@ class SettingsPage(QWidget):
         run.max_runtime = float(self.max_runtime.value())
         run.max_actions = self.max_actions.value()
         self.state.mark_dirty()
+
+    def _apply_failsafe(self) -> None:
+        if self._loading:
+            return
+        failsafe = self.state.config.failsafe
+        failsafe.watch_user_move = self.watch_switch.isChecked()
+        failsafe.threshold = self.watch_threshold.value()
+        failsafe.stop_instead_of_pause = self.watch_stop_switch.isChecked()
+        enabled = failsafe.watch_user_move
+        self.watch_threshold.setEnabled(enabled)
+        self.watch_stop_switch.setEnabled(enabled)
 
     def _apply_window(self) -> None:
         if self._loading:

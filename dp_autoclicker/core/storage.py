@@ -10,6 +10,7 @@ from typing import Optional
 
 from .models import (
     PRESET_SUFFIX,
+    Failsafe,
     Hotkeys,
     Preset,
     ValidationError,
@@ -72,6 +73,7 @@ class AppConfig:
     accent: str = "#5B8CFF"
     window: WindowState = field(default_factory=WindowState)
     hotkeys: Hotkeys = field(default_factory=Hotkeys)
+    failsafe: Failsafe = field(default_factory=Failsafe)
     last_preset: str = ""
     show_hints: bool = True
 
@@ -97,6 +99,8 @@ class AppConfig:
                 config.window = _from_mapping(WindowState, data[f.name])
             elif f.name == "hotkeys":
                 config.hotkeys = _from_mapping(Hotkeys, data[f.name])
+            elif f.name == "failsafe":
+                config.failsafe = _from_mapping(Failsafe, data[f.name])
             else:
                 setattr(config, f.name, data[f.name])
         config.__post_init__()
