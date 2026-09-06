@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
 from typing import Callable, Optional
 
 from .backends import BackendError, InputBackend, create_backend
-from .models import Preset
+from .hotkeys import normalize
+from .models import Failsafe, Preset
 from .runtime import actions as act
 from .runtime.events import EngineEvent
 from .runtime.interpreter import Interpreter
@@ -19,6 +21,8 @@ from .script.parser import parse
 
 #: шаг «нарезки» пауз, чтобы остановка срабатывала мгновенно
 _TICK = 0.02
+#: как часто сверять положение курсора (секунды)
+_GUARD_PERIOD = 0.05
 
 
 class EngineStopped(Exception):
@@ -45,6 +49,12 @@ class ScriptEngine:
         self._pause = threading.Event()
         self._lock = threading.Lock()
         self._backend: Optional[InputBackend] = None
+        self.failsafe = Failsafe()
+        #: где курсор должен находиться по мнению алгоритма
+        self._expected_pos: Optional[tuple[int, int]] = None
+        self._guard_checked_at = 0.0
+        #: последнее сочетание, отправленное самим алгоритмом, и когда
+        self._sent_keys: tuple[str, float] = ("", 0.0)
         self.stats = {"actions": 0, "clicks": 0, "keys": 0, "started_at": 0.0}
 
     # ------------------------------------------------------------ состояние
@@ -76,6 +86,7 @@ class ScriptEngine:
         preset: Preset,
         body: Optional[ast.Block] = None,
         screen_size: Optional[tuple[int, int]] = None,
+        failsafe: Optional[Failsafe] = None,
     ) -> bool:
         """Запускает алгоритм. Возвращает False, если запуск невозможен."""
         with self._lock:
@@ -98,6 +109,9 @@ class ScriptEngine:
 
             self._stop.clear()
             self._pause.clear()
+            self.failsafe = failsafe or Failsafe()
+            self._expected_pos = None
+            self._guard_checked_at = 0.0
             self.stats = {"actions": 0, "clicks": 0, "keys": 0, "started_at": time.time()}
             self._thread = threading.Thread(
                 target=self._run,
@@ -112,18 +126,35 @@ class ScriptEngine:
         self._stop.set()
         self._pause.clear()
 
-    def pause(self) -> None:
+    def pause(self, reason: str = "") -> None:
         if self.is_running and not self._pause.is_set():
             self._pause.set()
-            self.emit("paused", "Пауза")
+            self.emit("paused", f"Пауза — {reason}" if reason else "Пауза",
+                      data={"reason": reason})
 
     def resume(self) -> None:
         if self._pause.is_set():
+            # курсор мог остаться где угодно: слежение возобновится
+            # после того, как алгоритм сам передвинет его в следующий раз
+            self._expected_pos = None
             self._pause.clear()
             self.emit("resumed", "Продолжаем")
 
     def toggle_pause(self) -> None:
         self.resume() if self.is_paused else self.pause()
+
+    def recently_sent(self, combo: str, window: float = 0.3) -> bool:
+        """Не мы ли сами только что нажали это сочетание?
+
+        Алгоритм может нажимать клавиши, и системный слушатель иногда видит
+        их как обычный ввод. Без этой проверки скрипт с `клавиша f6` сам себя
+        останавливал бы. Сравниваем именно сочетание, поэтому настоящее
+        нажатие пользователя не теряется.
+        """
+        sent, at = self._sent_keys
+        if not sent or not combo:
+            return False
+        return sent == normalize(combo) and (time.monotonic() - at) < window
 
     def join(self, timeout: float = 5.0) -> None:
         thread = self._thread
@@ -197,11 +228,55 @@ class ScriptEngine:
         if self._stop.is_set():
             raise EngineStopped
 
+    # ------------------------------------------------- страховка от помех
+    def _sync_cursor(self, backend: InputBackend) -> None:
+        """Запоминает, где курсор оказался после нашего же перемещения.
+
+        Читаем фактическую позицию, а не желаемую: система могла подвинуть
+        курсор сама (край экрана, масштабирование), и это не вмешательство.
+        """
+        if not self.failsafe.watch_user_move:
+            return
+        try:
+            self._expected_pos = backend.position()
+        except Exception:  # pragma: no cover - драйвер не отвечает
+            self._expected_pos = None
+
+    def _guard_user_input(self, backend: Optional[InputBackend]) -> None:
+        """Если курсор уехал не по нашей воле — пауза (или остановка)."""
+        if backend is None or not self.failsafe.watch_user_move:
+            return
+        if self._expected_pos is None or self._pause.is_set():
+            return
+        now = time.monotonic()
+        if now - self._guard_checked_at < _GUARD_PERIOD:
+            return
+        self._guard_checked_at = now
+        try:
+            actual = backend.position()
+        except Exception:  # pragma: no cover - драйвер не отвечает
+            return
+        drift = math.dist(actual, self._expected_pos)
+        if drift < self.failsafe.threshold:
+            return
+        # дальше следить бессмысленно: курсор теперь там, куда его увёл человек
+        self._expected_pos = None
+        self.emit(
+            "warning",
+            f"Курсор сдвинут вручную (на {drift:.0f} px) — вмешательство пользователя",
+            data={"drift": drift},
+        )
+        if self.failsafe.stop_instead_of_pause:
+            self.stop()
+        else:
+            self.pause("вы двигали мышью")
+
     def _sleep(self, seconds: float) -> None:
         """Пауза, которую можно прервать и поставить на паузу."""
         deadline = time.monotonic() + max(0.0, seconds)
         while True:
             self._raise_if_stopped()
+            self._guard_user_input(self._backend)
             if self._pause.is_set():
                 paused_at = time.monotonic()
                 while self._pause.is_set():
@@ -227,11 +302,13 @@ class ScriptEngine:
         if duration <= 0 or len(path) == 1:
             x, y = path[-1]
             backend.move(x, y)
+            self._sync_cursor(backend)
             return
         step = duration / len(path)
         for x, y in path:
             self._raise_if_stopped()
             backend.move(x, y)
+            self._sync_cursor(backend)
             self._sleep(step)
 
     def _perform(self, action: act.Action, backend: InputBackend) -> None:
@@ -241,6 +318,11 @@ class ScriptEngine:
         if isinstance(action, act.LogMessage):
             self.emit("log", action.message, uid=action.uid, line=action.line)
             return
+
+        # перед любым вводом убеждаемся, что мышь всё ещё «наша»,
+        # и дожидаемся снятия паузы
+        self._guard_user_input(backend)
+        self._sleep(0.0)
 
         if isinstance(action, act.MoveTo):
             self._glide(backend, action.path or [(action.x, action.y)], action.duration)
@@ -254,12 +336,15 @@ class ScriptEngine:
         elif isinstance(action, act.MouseDown):
             if action.x is not None and action.y is not None:
                 backend.move(action.x, action.y)
+                self._sync_cursor(backend)
             backend.mouse_down(action.button)
         elif isinstance(action, act.MouseUp):
             backend.mouse_up(action.button)
         elif isinstance(action, act.ScrollBy):
             backend.scroll(action.dx, action.dy)
         elif isinstance(action, act.KeyTap):
+            # запоминаем до отправки: слушатель может сработать мгновенно
+            self._sent_keys = (normalize(action.combo), time.monotonic())
             backend.key_tap(action.combo)
             self.stats["keys"] += 1
         elif isinstance(action, act.TypeText):

@@ -366,3 +366,133 @@ def test_picking_adds_point_to_preset(window, app):
     app.processEvents()
     assert len(window.state.preset.points) == before + 1
     assert window.state.preset.points[-1].pos == (300, 400)
+
+
+# ------------------------------------------------------- горячие клавиши
+def test_hotkey_from_another_thread_reaches_the_ui(window, app):
+    """Слушатель pynput живёт в своём потоке — сигнал должен дойти до окна."""
+    import threading
+
+    seen: list[str] = []
+    window.hotkeyPressed.connect(lambda name: seen.append(name))
+    threading.Thread(
+        target=lambda: window.hotkeyPressed.emit("panic_stop"), daemon=True
+    ).start()
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not seen:
+        app.processEvents()
+        time.sleep(0.01)
+    assert seen == ["panic_stop"]
+
+
+def test_hotkey_signal_runs_the_matching_action(window, app):
+    calls: list[str] = []
+    window.toggle_run = lambda: calls.append("run")
+    window.toggle_pause = lambda: calls.append("pause")
+    window.stop = lambda: calls.append("stop")
+    window.pick_point_hotkey = lambda: calls.append("pick")
+
+    for action in ("start_stop", "pause", "panic_stop", "pick_point"):
+        window._on_hotkey(action)
+    assert calls == ["run", "pause", "stop", "pick"]
+    window._on_hotkey("такого_нет")  # неизвестное действие не должно ломать окно
+
+
+def test_hotkeys_are_bound_for_every_action(window):
+    bound = {b.action for b in window.hotkeys._bindings}
+    assert bound == {"start_stop", "pause", "panic_stop", "pick_point"}
+    # сочетания по умолчанию корректны, поэтому все они попадают в регистрацию
+    assert set(window.hotkeys._prepare()) == {"<f6>", "<f7>", "<f8>", "<f2>"}
+
+
+def test_bad_hotkey_in_settings_is_marked_and_skipped(window):
+    page = window.settings_page
+    page.hotkey_edits["pause"].setText("абракадабра")
+    page._apply_hotkeys()
+    assert "border-color" in page.hotkey_edits["pause"].styleSheet()
+    # остальные действия продолжают работать
+    registered = window.hotkeys._prepare()
+    assert "<f6>" in registered and "<f7>" not in registered
+    assert any("пауза" in p for p in window.hotkeys.problems)
+
+
+def test_hotkey_status_is_shown_to_the_user(window):
+    window._rebind_hotkeys()
+    text = window.settings_page.hotkey_status.text()
+    assert text
+    assert "клавиш" in text.lower() or "F6" in text
+
+
+# ------------------------------------------------------------- страховка
+def test_failsafe_settings_are_written_to_config(window):
+    page = window.settings_page
+    page.watch_switch.setChecked(True)
+    page.watch_threshold.setValue(25)
+    page.watch_stop_switch.setChecked(True)
+    page._apply_failsafe()
+
+    failsafe = window.state.config.failsafe
+    assert failsafe.watch_user_move is True
+    assert failsafe.threshold == 25
+    assert failsafe.stop_instead_of_pause is True
+
+
+def test_failsafe_controls_disable_together(window):
+    page = window.settings_page
+    page.watch_switch.setChecked(False)
+    page._apply_failsafe()
+    assert not page.watch_threshold.isEnabled()
+    assert not page.watch_stop_switch.isEnabled()
+
+
+def test_engine_receives_failsafe_on_start(window, app):
+    window.state.config.failsafe.threshold = 33
+    window.state.config.failsafe.watch_user_move = True
+    window.state.preset.script = "клик Точка1"
+    window.state.replace_preset(window.state.preset)
+    window.start()
+    assert window.engine.failsafe.threshold == 33
+    assert window.engine.failsafe.watch_user_move is True
+    deadline = time.monotonic() + 5
+    while window.engine.is_running and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def test_pause_reason_is_shown_in_the_status(window, app):
+    from dp_autoclicker.core.runtime.events import EngineEvent
+
+    window._handle_event(
+        EngineEvent(kind="paused", message="Пауза — вы двигали мышью",
+                    data={"reason": "вы двигали мышью"})
+    )
+    assert window._pause_reason == "вы двигали мышью"
+    window._handle_event(EngineEvent(kind="resumed", message="Продолжаем"))
+    assert window._pause_reason == ""
+
+
+def test_hotkey_typed_by_the_script_itself_is_ignored(window, app):
+    """Алгоритм нажал F6 — окно не должно принять это за команду «стоп»."""
+    calls: list[str] = []
+    window.toggle_run = lambda: calls.append("run")
+    window.state.config.hotkeys.start_stop = "f6"
+
+    window.engine._sent_keys = ("<f6>", time.monotonic())
+    window._on_hotkey("start_stop")
+    assert calls == [], "своё же нажатие не должно запускать алгоритм"
+
+    # настоящее нажатие пользователя проходит
+    window.engine._sent_keys = ("", 0.0)
+    window._on_hotkey("start_stop")
+    assert calls == ["run"]
+
+
+def test_other_hotkeys_still_work_while_script_types_keys(window):
+    """Скрипт печатает F6 — но F8 остаётся живой аварийной остановкой."""
+    calls: list[str] = []
+    window.stop = lambda: calls.append("stop")
+    window.state.config.hotkeys.panic_stop = "f8"
+    window.engine._sent_keys = ("<f6>", time.monotonic())
+    window._on_hotkey("panic_stop")
+    assert calls == ["stop"]

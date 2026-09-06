@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -124,10 +125,67 @@ def self_check(verbose: bool = True) -> int:
     else:
         problems.append("движок: не удалось запустить алгоритм")
 
+    # страховка: алгоритм должен встать на паузу, если курсор увели вручную
+    class _Desk(NullBackend):
+        real = True
+
+    from .core.models import Failsafe
+
+    desk = _Desk()
+    guard_engine = ScriptEngine(backend_factory=lambda dry, screen: desk)
+    guard_preset = Preset(name="страховка")
+    guard_preset.add_point(100, 200, "A")
+    guard_preset.script = "цикл { клик A ждать 1с }"
+    if guard_engine.start(
+        guard_preset,
+        screen_size=(1920, 1080),
+        failsafe=Failsafe(watch_user_move=True, threshold=40),
+    ):
+        deadline = time.monotonic() + 5
+        while not desk.clicks() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.1)
+        x, y = desk.position()
+        desk._pos = (x + 300, y + 300)  # «рука пользователя»
+        while not guard_engine.is_paused and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if guard_engine.is_paused:
+            say("  ✓ страховка: движение мыши ставит алгоритм на паузу")
+        else:
+            problems.append("страховка: движение мыши не остановило алгоритм")
+        guard_engine.stop()
+        guard_engine.join(3)
+    else:
+        problems.append("страховка: не удалось запустить проверочный алгоритм")
+
     from .core.backends import probe_backend
 
     available, message = probe_backend()
     say(f"  {'✓' if available else '!'} {message}")
+
+    # горячие клавиши: сочетания по умолчанию должны быть корректны
+    from .core.hotkeys import HotkeyManager, describe
+    from .core.storage import AppConfig
+
+    keys = AppConfig().hotkeys
+    manager = HotkeyManager()
+    for action, title in (
+        ("start_stop", "старт/стоп"), ("pause", "пауза"),
+        ("panic_stop", "остановка"), ("pick_point", "новая точка"),
+    ):
+        manager.bind(action, getattr(keys, action), lambda: None, title)
+    manager._prepare()
+    if manager.problems:
+        problems.append("горячие клавиши: " + "; ".join(manager.problems))
+    else:
+        combos = ", ".join(describe(combo) for combo in manager.registered.values())
+        say(f"  ✓ горячие клавиши разобраны: {combos}")
+    if manager.start():
+        say("  ✓ глобальные горячие клавиши слушаются")
+        manager.stop()
+    else:
+        say(f"  ! {manager.status_text()}")
+
 
     try:
         from PySide6 import QtCore

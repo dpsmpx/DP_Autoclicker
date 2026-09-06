@@ -8,7 +8,7 @@ import pytest
 
 from dp_autoclicker.core.backends.null import NullBackend
 from dp_autoclicker.core.engine import ScriptEngine
-from dp_autoclicker.core.models import Preset, RunSettings
+from dp_autoclicker.core.models import Failsafe, Preset, RunSettings
 from dp_autoclicker.core.storage import AppConfig, PresetLibrary
 
 
@@ -163,3 +163,149 @@ def test_app_config_survives_broken_file(tmp_path):
     path = tmp_path / "config.json"
     path.write_text("{сломано", encoding="utf-8")
     assert AppConfig.load(path).dialect == "ru"
+
+
+# ------------------------------------------- страховка от вмешательства мыши
+class Desk(NullBackend):
+    """Драйвер с «настоящим» курсором, который может тронуть человек."""
+
+    real = True
+
+    def user_moves_mouse(self, x: int, y: int) -> None:
+        self._pos = (int(x), int(y))
+
+
+def start_watched(
+    failsafe: Failsafe, script: str = "цикл { клик A ждать 1с }"
+) -> tuple[Desk, ScriptEngine]:
+    preset = Preset(name="страховка")
+    preset.add_point(100, 200, "A")
+    preset.script = script
+    desk = Desk()
+    engine = ScriptEngine(backend_factory=lambda dry, screen: desk)
+    assert engine.start(preset, screen_size=(1920, 1080), failsafe=failsafe)
+    return desk, engine
+
+
+def until(check, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if check():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def grab_mouse(desk: Desk, distance: int = 300) -> None:
+    """Ждём первый клик и «берёмся за мышь», пока алгоритм ждёт."""
+    assert until(lambda: len(desk.clicks()) >= 1), "алгоритм не сделал ни одного клика"
+    time.sleep(0.1)
+    x, y = desk.position()
+    desk.user_moves_mouse(x + distance, y + distance)
+
+
+def test_user_moving_mouse_pauses_the_run():
+    desk, engine = start_watched(Failsafe(watch_user_move=True, threshold=40))
+    try:
+        grab_mouse(desk)
+        assert until(lambda: engine.is_paused, 3.0), "движок не встал на паузу"
+
+        events = engine.drain()
+        warnings = [e for e in events if e.kind == "warning"]
+        paused = [e for e in events if e.kind == "paused"]
+        assert warnings and "сдвинут вручную" in warnings[0].message
+        assert paused and paused[0].data.get("reason") == "вы двигали мышью"
+
+        frozen = len(desk.clicks())
+        time.sleep(0.3)
+        assert len(desk.clicks()) == frozen, "на паузе действий быть не должно"
+    finally:
+        engine.stop()
+        wait_for(engine)
+
+
+def test_run_continues_after_manual_resume():
+    desk, engine = start_watched(
+        Failsafe(watch_user_move=True, threshold=40), "цикл { клик A ждать 60мс }"
+    )
+    try:
+        grab_mouse(desk)
+        assert until(lambda: engine.is_paused, 3.0)
+        frozen = len(desk.clicks())
+        engine.resume()
+        assert until(lambda: len(desk.clicks()) > frozen, 3.0)
+        # сразу после продолжения повторной ложной паузы быть не должно
+        assert not engine.is_paused
+    finally:
+        engine.stop()
+        wait_for(engine)
+
+
+def test_failsafe_can_stop_instead_of_pausing():
+    desk, engine = start_watched(
+        Failsafe(watch_user_move=True, threshold=40, stop_instead_of_pause=True)
+    )
+    grab_mouse(desk)
+    assert until(lambda: not engine.is_running, 3.0), "движок не остановился"
+
+
+def test_small_drift_below_threshold_is_ignored():
+    desk, engine = start_watched(Failsafe(watch_user_move=True, threshold=40))
+    try:
+        assert until(lambda: len(desk.clicks()) >= 1)
+        time.sleep(0.1)
+        x, y = desk.position()
+        desk.user_moves_mouse(x + 10, y + 10)  # ~14 px
+        time.sleep(0.3)
+        assert not engine.is_paused
+    finally:
+        engine.stop()
+        wait_for(engine)
+
+
+def test_failsafe_disabled_lets_the_run_continue():
+    desk, engine = start_watched(Failsafe(watch_user_move=False))
+    try:
+        grab_mouse(desk)
+        time.sleep(0.3)
+        assert not engine.is_paused
+    finally:
+        engine.stop()
+        wait_for(engine)
+
+
+def test_normal_run_is_not_interrupted_by_the_failsafe():
+    desk, engine = start_watched(
+        Failsafe(watch_user_move=True, threshold=40), "повторить 6 { клик A ждать 50мс }"
+    )
+    wait_for(engine, timeout=6.0)
+    assert len(desk.clicks()) == 6
+    assert not engine.is_paused
+
+
+def test_failsafe_defaults_to_watching():
+    assert Failsafe().watch_user_move is True
+    assert ScriptEngine().failsafe.watch_user_move is True
+
+
+def test_engine_remembers_keys_it_sent_itself():
+    """Скрипт, нажимающий горячую клавишу, не должен сам себя остановить."""
+    preset, recorder, engine = make("клавиша f6")
+    assert engine.start(preset)
+    wait_for(engine)
+    assert ("key", "f6") in recorder.calls
+    assert engine.recently_sent("f6") is True
+    assert engine.recently_sent("F6") is True      # регистр не важен
+    assert engine.recently_sent("f8") is False     # другая клавиша — не наша
+    assert engine.recently_sent("") is False
+
+
+def test_sent_key_memory_expires():
+    preset, _, engine = make("клавиша f6")
+    engine.start(preset)
+    wait_for(engine)
+    assert engine.recently_sent("f6", window=0.0) is False
+
+
+def test_fresh_engine_has_not_sent_anything():
+    assert ScriptEngine().recently_sent("f6") is False
