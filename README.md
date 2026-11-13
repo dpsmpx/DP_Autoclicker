@@ -209,3 +209,8 @@ dp_autoclicker/
 ## Лицензия
 
 GPL-3.0 — см. [LICENSE](LICENSE).
+
+## Скачать Windows
+
+Готовый `.exe` публикуется в [Releases](https://github.com/dpsmpx/DP_Autoclicker/releases).
+Сборка делается GitHub Actions (PyInstaller, Windows).
