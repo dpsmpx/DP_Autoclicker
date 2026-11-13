@@ -1,5 +1,5 @@
-# Сборка Windows .exe (PyInstaller) и публикация GitHub Release.
-# Запуск: docs/RELEASE_NOTES/**, тег v*, или workflow_dispatch.
+# Сборка автономного Windows .exe (PyInstaller onefile) и GitHub Release.
+# Python нужен только на CI; у пользователя .exe запускается двойным кликом.
 name: Release
 
 on:
@@ -26,7 +26,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
 
       - name: Версия и описание
         id: meta
@@ -50,21 +49,40 @@ jobs:
           echo "Версия $VERSION"
 
       - name: Зависимости и PyInstaller
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
+          # пакет в site-packages — PyInstaller надёжнее находит модули
+          python -m pip install .
 
-      - name: Сборка .exe
-        shell: pwsh
+      - name: Сборка standalone .exe
+        shell: bash
         run: |
-          pyinstaller --noconfirm --clean --windowed --onefile `
-            --name "DP_Autoclicker" `
-            --collect-all PySide6 `
-            --collect-all pynput `
-            --add-data "presets;presets" `
-            --hidden-import dp_autoclicker `
-            --hidden-import dp_autoclicker.app `
-            run.py
+          pyinstaller \
+            --noconfirm \
+            --clean \
+            --onefile \
+            --windowed \
+            --name "DP_Autoclicker" \
+            --collect-all PySide6 \
+            --collect-all pynput \
+            --add-data "presets;presets" \
+            --hidden-import dp_autoclicker \
+            --hidden-import dp_autoclicker.app \
+            DP_Autoclicker.py
+
+      - name: Проверка артефакта
+        shell: bash
+        run: |
+          ls -la dist/
+          SIZE=$(stat -c%s dist/DP_Autoclicker.exe 2>/dev/null || stat -f%z dist/DP_Autoclicker.exe)
+          echo "Size: $SIZE bytes"
+          # PySide6 onefile обычно десятки–сотни МБ; меньше 20 МБ — ошибка сборки
+          if [ "$SIZE" -lt 20000000 ]; then
+            echo "Exe слишком маленький — сборка, скорее всего, неполная"
+            exit 1
+          fi
 
       - name: Артефакт
         uses: actions/upload-artifact@v4
@@ -72,14 +90,6 @@ jobs:
           name: DP_Autoclicker-windows
           path: dist/DP_Autoclicker.exe
           if-no-files-found: error
-
-      - name: SHA-256
-        id: hash
-        shell: bash
-        run: |
-          HASH=$(sha256sum dist/DP_Autoclicker.exe | awk '{print $1}')
-          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
-          echo "SHA-256: $HASH"
 
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
