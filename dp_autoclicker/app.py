@@ -99,57 +99,121 @@ def self_check(verbose: bool = True) -> int:
             problems.append(f"«{title}»: скрипт не разбирается — {exc}")
             continue
         try:
-            roundtrip = to_source(body)
-            parse(roundtrip)
+            restored = to_source(body)
+            if to_source(parse(restored).body) != restored:
+                problems.append(f"«{title}»: текст не совпадает после пересборки")
         except Exception as exc:
-            problems.append(f"«{title}»: round-trip скрипта — {exc}")
-            continue
+            problems.append(f"«{title}»: ошибка печати — {exc}")
         try:
-            engine = ScriptEngine(backend=NullBackend())
-            engine.load(preset)
-            engine.start()
-            deadline = time.monotonic() + 2.0
-            while engine.is_running and time.monotonic() < deadline:
-                time.sleep(0.05)
-            engine.stop()
+            points = {p.name: p for p in preset.points}
+            actions = collect(body, points, limit=200)
+            say(f"  ✓ {title}: инструкций {len(body)}, действий (первые) {len(actions)}")
         except Exception as exc:
-            problems.append(f"«{title}»: прогон — {exc}")
-            continue
-        say(f"  ✓ {title}")
+            problems.append(f"«{title}»: ошибка исполнения — {exc}")
+
+    recorder = NullBackend()
+    engine = ScriptEngine(backend_factory=lambda dry, screen: recorder)
+    preset = examples()[1]
+    preset.script = "повторить 3 { клик Точка1\n ждать 10мс\n клик Точка2 }"
+    if engine.start(preset, screen_size=(1920, 1080)):
+        engine.join(10)
+        clicks = recorder.clicks()
+        if len(clicks) != 6:
+            problems.append(f"движок: ожидалось 6 нажатий, получено {len(clicks)}")
+        else:
+            say(f"  ✓ движок: {len(clicks)} нажатий выполнено")
+    else:
+        problems.append("движок: не удалось запустить алгоритм")
+
+    # страховка: алгоритм должен встать на паузу, если курсор увели вручную
+    class _Desk(NullBackend):
+        real = True
+
+    from .core.models import Failsafe
+
+    desk = _Desk()
+    guard_engine = ScriptEngine(backend_factory=lambda dry, screen: desk)
+    guard_preset = Preset(name="страховка")
+    guard_preset.add_point(100, 200, "A")
+    guard_preset.script = "цикл { клик A ждать 1с }"
+    if guard_engine.start(
+        guard_preset,
+        screen_size=(1920, 1080),
+        failsafe=Failsafe(watch_user_move=True, threshold=40),
+    ):
+        deadline = time.monotonic() + 5
+        while not desk.clicks() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.1)
+        x, y = desk.position()
+        desk._pos = (x + 300, y + 300)  # «рука пользователя»
+        while not guard_engine.is_paused and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if guard_engine.is_paused:
+            say("  ✓ страховка: движение мыши ставит алгоритм на паузу")
+        else:
+            problems.append("страховка: движение мыши не остановило алгоритм")
+        guard_engine.stop()
+        guard_engine.join(3)
+    else:
+        problems.append("страховка: не удалось запустить проверочный алгоритм")
+
+    from .core.backends import probe_backend
+
+    available, message = probe_backend()
+    say(f"  {'✓' if available else '!'} {message}")
+
+    # горячие клавиши: сочетания по умолчанию должны быть корректны
+    from .core.hotkeys import HotkeyManager, describe
+    from .core.storage import AppConfig
+
+    keys = AppConfig().hotkeys
+    manager = HotkeyManager()
+    for action, title in (
+        ("start_stop", "старт/стоп"), ("pause", "пауза"),
+        ("panic_stop", "остановка"), ("pick_point", "новая точка"),
+    ):
+        manager.bind(action, getattr(keys, action), lambda: None, title)
+    manager._prepare()
+    if manager.problems:
+        problems.append("горячие клавиши: " + "; ".join(manager.problems))
+    else:
+        combos = ", ".join(describe(combo) for combo in manager.registered.values())
+        say(f"  ✓ горячие клавиши разобраны: {combos}")
+    if manager.start():
+        say("  ✓ глобальные горячие клавиши слушаются")
+        manager.stop()
+    else:
+        say(f"  ! {manager.status_text()}")
+
 
     try:
-        from PySide6 import QtCore  # noqa: F401
+        from PySide6 import QtCore
 
-        say("  ✓ PySide6 доступен")
-    except Exception as exc:
+        say(f"  ✓ графическая библиотека Qt {QtCore.__version__}")
+    except Exception as exc:  # pragma: no cover
         problems.append(f"PySide6 недоступен: {exc}")
 
-    try:
-        import pynput  # noqa: F401
-
-        say("  ✓ pynput доступен")
-    except Exception as exc:
-        problems.append(f"pynput недоступен: {exc}")
-
     if problems:
-        say("\nОбнаружены проблемы:")
-        for item in problems:
-            say(f"  ✗ {item}")
+        print("\nОбнаружены проблемы:")
+        for problem in problems:
+            print(f"  ✗ {problem}")
         return 1
     say("\nВсё в порядке.")
     return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="dp-autoclicker", description=APP_NAME)
-    parser.add_argument("--self-check", action="store_true", help="быстрая самопроверка")
-    parser.add_argument("--preset", type=Path, help="открыть пресет при старте")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser = argparse.ArgumentParser(
+        prog="dp-autoclicker", description=f"{APP_NAME} — автокликер с визуальным редактором"
+    )
+    parser.add_argument("preset", nargs="?", help="файл пресета для открытия")
+    parser.add_argument(
+        "--self-check", action="store_true", help="проверить работоспособность и выйти"
+    )
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {VERSION}")
     args = parser.parse_args(argv)
+
     if args.self_check:
         return self_check()
-    return run_gui(args.preset)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return run_gui(Path(args.preset) if args.preset else None)
