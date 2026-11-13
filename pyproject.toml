@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dp-autoclicker"
-version = "1.0.0"
+version = "1.0.1"
 description = "Автокликер с плавающим окном, визуальным конструктором алгоритмов и переносимыми пресетами"
 readme = "README.md"
 requires-python = ">=3.9"
